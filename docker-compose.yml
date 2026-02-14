@@ -7,6 +7,10 @@ services:
       - ./i2pd/i2pd.conf:/home/i2pd/data/i2pd.conf:ro
       - ./i2pd/tunnels.conf:/home/i2pd/data/tunnels.conf:ro
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 16384
+        hard: 16384
 
   smp-server:
     build: .
