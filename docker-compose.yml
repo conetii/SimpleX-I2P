@@ -1,0 +1,26 @@
+services:
+  i2pd:
+    image: purplei2p/i2pd
+    volumes:
+      - i2pd_data:/var/lib/i2pd
+      - ./i2pd/i2pd.conf:/etc/i2pd/i2pd.conf:ro
+      - ./i2pd/tunnels.conf:/etc/i2pd/tunnels.conf:ro
+    restart: unless-stopped
+
+  smp-server:
+    build: .
+    environment:
+      - SMP_DB_PASSWORD=${SMP_DB_PASSWORD}
+      - SMP_PORT=5223
+      - SMP_DB_PATH=/data/smp.db
+      - SMP_TLS_CERT=/data/server.crt
+      - SMP_TLS_KEY=/data/server.key
+    volumes:
+      - smp_data:/data
+    depends_on:
+      - i2pd
+    restart: unless-stopped
+
+volumes:
+  i2pd_data:
+  smp_data:
