@@ -1,7 +1,6 @@
 #include "smp_server.hpp"
 
 #include <arpa/inet.h>
-#include <cstring>
 #include <iostream>
 #include <netinet/in.h>
 #include <sodium.h>
@@ -15,6 +14,10 @@
 
 namespace smp {
 
+// SMP protocol version range
+static constexpr uint16_t SMP_VERSION_MIN = 6;
+static constexpr uint16_t SMP_VERSION_MAX = 17;
+
 namespace {
 
 std::string hexEncode(const std::vector<uint8_t>& data) {
@@ -26,6 +29,55 @@ std::string hexEncode(const std::vector<uint8_t>& data) {
         out += buf;
     }
     return out;
+}
+
+// Build a padded 16384-byte SMP transport block
+// Format: BE16(contentLen) + content + '#' padding
+std::vector<uint8_t> padBlock(const std::vector<uint8_t>& content) {
+    std::vector<uint8_t> block(BLOCK_SIZE, '#');
+    uint16_t len = static_cast<uint16_t>(content.size());
+    block[0] = static_cast<uint8_t>(len >> 8);
+    block[1] = static_cast<uint8_t>(len & 0xFF);
+    std::copy(content.begin(), content.end(), block.begin() + 2);
+    return block;
+}
+
+// Read exactly n bytes from SSL
+bool sslReadExact(SSL* ssl, std::vector<uint8_t>& buf, size_t n) {
+    buf.resize(n);
+    size_t total = 0;
+    while (total < n) {
+        int r = SSL_read(ssl, buf.data() + total, static_cast<int>(n - total));
+        if (r <= 0) return false;
+        total += r;
+    }
+    return true;
+}
+
+// Get TLS tls-unique channel binding (RFC 5929)
+// For TLS 1.3, use Finished message as session binding
+std::vector<uint8_t> getTlsUnique(SSL* ssl) {
+    // For TLS 1.3, tls-unique is not directly available.
+    // Use SSL_get_peer_finished / SSL_get_finished as approximation.
+    // Server side: getPeerFinished gives the client's Finished message
+    uint8_t buf[128];
+
+    // Try getPeerFinished first (what Haskell simplexmq uses for server)
+    size_t len = SSL_get_peer_finished(ssl, buf, sizeof(buf));
+    if (len > 0) {
+        return std::vector<uint8_t>(buf, buf + len);
+    }
+
+    // Fallback to getFinished
+    len = SSL_get_finished(ssl, buf, sizeof(buf));
+    if (len > 0) {
+        return std::vector<uint8_t>(buf, buf + len);
+    }
+
+    // Last resort: random session ID
+    std::vector<uint8_t> sid(32);
+    randombytes_buf(sid.data(), sid.size());
+    return sid;
 }
 
 } // anonymous namespace
@@ -125,19 +177,19 @@ void SmpServer::stop() {
 void SmpServer::handleClient(SSL* ssl, int /*fd*/) {
     ClientSession session;
     session.ssl = ssl;
-    // Generate session ID
-    session.session_id.resize(32);
-    randombytes_buf(session.session_id.data(), 32);
+
+    // Perform SMP handshake
+    if (!performHandshake(ssl, session)) {
+        std::cerr << "[smp] Handshake failed" << std::endl;
+        return;
+    }
+    std::cerr << "[smp] Handshake complete, sessionId="
+              << hexEncode(session.session_id) << std::endl;
 
     while (running_) {
         // Read a full BLOCK_SIZE transmission
-        std::vector<uint8_t> buf(BLOCK_SIZE);
-        int total = 0;
-        while (total < (int)BLOCK_SIZE) {
-            int n = SSL_read(ssl, buf.data() + total, BLOCK_SIZE - total);
-            if (n <= 0) return; // Connection closed or error
-            total += n;
-        }
+        std::vector<uint8_t> buf;
+        if (!sslReadExact(ssl, buf, BLOCK_SIZE)) return;
 
         auto block = parseTransmission(buf);
         if (!block) {
@@ -153,6 +205,65 @@ void SmpServer::handleClient(SSL* ssl, int /*fd*/) {
         auto out = serializeResponse(rsp);
         SSL_write(ssl, out.data(), (int)out.size());
     }
+}
+
+bool SmpServer::performHandshake(SSL* ssl, ClientSession& session) {
+    // Step 1: Derive session ID from TLS channel binding
+    session.session_id = getTlsUnique(ssl);
+
+    // Step 2: Build ServerHandshake content
+    // Format: BE16(minVer) + BE16(maxVer) + byte(sessionIdLen) + sessionId
+    std::vector<uint8_t> serverContent;
+
+    // Version range: two BE16 values
+    serverContent.push_back(static_cast<uint8_t>(SMP_VERSION_MIN >> 8));
+    serverContent.push_back(static_cast<uint8_t>(SMP_VERSION_MIN & 0xFF));
+    serverContent.push_back(static_cast<uint8_t>(SMP_VERSION_MAX >> 8));
+    serverContent.push_back(static_cast<uint8_t>(SMP_VERSION_MAX & 0xFF));
+
+    // Session ID: 1-byte length prefix + data
+    serverContent.push_back(static_cast<uint8_t>(session.session_id.size()));
+    serverContent.insert(serverContent.end(),
+                         session.session_id.begin(),
+                         session.session_id.end());
+
+    // Pad and send server hello
+    auto serverBlock = padBlock(serverContent);
+    if (SSL_write(ssl, serverBlock.data(), (int)serverBlock.size()) <= 0) {
+        return false;
+    }
+
+    // Step 3: Read client hello (16384 bytes)
+    std::vector<uint8_t> clientBlock;
+    if (!sslReadExact(ssl, clientBlock, BLOCK_SIZE)) {
+        return false;
+    }
+
+    // Parse client hello: BE16(contentLen) + BE16(version) + byte(keyHashLen) + keyHash + ...
+    if (clientBlock.size() < 2) return false;
+    uint16_t contentLen = (uint16_t(clientBlock[0]) << 8) | clientBlock[1];
+    if (contentLen < 4) return false; // at least version + 1 byte keyhash len + something
+
+    size_t off = 2;
+    // Client selected version
+    uint16_t clientVersion = (uint16_t(clientBlock[off]) << 8) | clientBlock[off + 1];
+    off += 2;
+
+    std::cerr << "[smp] Client selected SMP version " << clientVersion << std::endl;
+
+    if (clientVersion < SMP_VERSION_MIN || clientVersion > SMP_VERSION_MAX) {
+        std::cerr << "[smp] Unsupported client version: " << clientVersion << std::endl;
+        return false;
+    }
+
+    // Key hash: 1-byte length prefix + data (we accept but don't validate for now)
+    if (off >= 2 + contentLen) return true; // minimal client hello
+    uint8_t khLen = clientBlock[off];
+    off += 1;
+    // Skip key hash bytes
+    off += khLen;
+
+    return true;
 }
 
 ResponseBlock SmpServer::processCommand(const TransmissionBlock& block, ClientSession& session) {

@@ -1,37 +1,48 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Read the destination from i2pd volume and compute .b32.i2p address
-CONTAINER=$(docker compose ps -q i2pd 2>/dev/null || true)
+cd "$(dirname "$0")/.."
 
-if [ -z "$CONTAINER" ]; then
-    echo "Error: i2pd container is not running. Run ./scripts/setup.sh first."
+# Get .b32.i2p address from i2pd web console
+for PORT in 7072 7070 7071; do
+    ADDR=$(curl -s "http://localhost:${PORT}/?page=local_destinations" 2>/dev/null \
+        | grep -oP 'b32=\K[a-z0-9]+' | head -1)
+    [ -n "$ADDR" ] && break
+done
+
+if [ -z "$ADDR" ]; then
+    echo "Could not determine .b32.i2p address."
+    echo "i2pd may still be starting. Wait a few minutes and try again."
     exit 1
 fi
 
-# The tunnel key file contains the destination
-DEST=$(docker exec "$CONTAINER" sh -c \
-    'if [ -f /var/lib/i2pd/simplex-smp.dat ]; then
-        head -c 387 /var/lib/i2pd/simplex-smp.dat | base64 -w0
-    fi' 2>/dev/null)
+echo "Your SMP server I2P address:"
+echo "  ${ADDR}.b32.i2p"
+echo ""
 
-if [ -z "$DEST" ]; then
-    echo "Tunnel key not yet generated. Wait for i2pd to start and try again."
-    echo "Check status: docker compose logs i2pd"
-    exit 1
+# Get TLS fingerprint (base64url-encoded SHA256 of DER cert)
+TMPCERT=$(mktemp)
+trap "rm -f $TMPCERT" EXIT
+
+# Try docker cp first, then direct path
+CONTAINER=$(docker compose ps -q smp-server 2>/dev/null || true)
+if [ -n "$CONTAINER" ]; then
+    docker cp "$CONTAINER:/data/server.crt" "$TMPCERT" 2>/dev/null || true
 fi
 
-# Compute b32 address from destination hash
-ADDR=$(docker exec "$CONTAINER" sh -c \
-    'cat /var/lib/i2pd/simplex-smp.dat 2>/dev/null | head -c 387 | sha256sum | cut -d" " -f1 | xxd -r -p | base32 | tr "A-Z" "a-z" | tr -d "="' 2>/dev/null)
+if [ ! -s "$TMPCERT" ] && [ -f /data/server.crt ]; then
+    cp /data/server.crt "$TMPCERT"
+fi
 
-if [ -n "$ADDR" ]; then
-    echo "Your SMP server I2P address:"
-    echo "  ${ADDR}.b32.i2p"
-    echo ""
+if [ -s "$TMPCERT" ]; then
+    FINGERPRINT=$(openssl x509 -in "$TMPCERT" -outform der 2>/dev/null \
+        | openssl dgst -sha256 -binary | base64 | tr '+/' '-_' | tr -d '=')
     echo "SimpleX connection string:"
-    echo "  smp://<fingerprint>@${ADDR}.b32.i2p:5223"
+    echo "  smp://${FINGERPRINT}@${ADDR}.b32.i2p"
 else
-    echo "Could not compute address. Check i2pd logs:"
-    echo "  docker compose logs i2pd"
+    echo "SimpleX connection string:"
+    echo "  smp://<fingerprint>@${ADDR}.b32.i2p"
+    echo ""
+    echo "Could not read TLS cert. Get fingerprint manually:"
+    echo "  docker compose exec smp-server cat /data/server.crt"
 fi

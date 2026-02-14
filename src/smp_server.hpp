@@ -38,6 +38,7 @@ private:
         std::unordered_map<std::string, bool> subscriptions;
     };
 
+    bool performHandshake(SSL* ssl, ClientSession& session);
     void handleClient(SSL* ssl, int fd);
     ResponseBlock processCommand(const TransmissionBlock& block, ClientSession& session);
 
