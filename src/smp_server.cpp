@@ -94,9 +94,18 @@ SmpServer::SmpServer(SmpStore& store,
 
     SSL_CTX_set_min_proto_version(ctx_, TLS1_3_VERSION);
 
-    // Set ALPN
-    static const unsigned char alpn[] = {4, 's', 'm', 'p', '1'};
-    SSL_CTX_set_alpn_protos(ctx_, alpn, sizeof(alpn));
+    // Set ALPN callback (server-side)
+    SSL_CTX_set_alpn_select_cb(ctx_, [](SSL*, const unsigned char** out,
+            unsigned char* outlen, const unsigned char* in, unsigned int inlen,
+            void*) -> int {
+        // Look for "smp1" in client's ALPN list
+        static const unsigned char smp1[] = {4, 's', 'm', 'p', '1'};
+        if (SSL_select_next_proto(const_cast<unsigned char**>(out), outlen,
+                smp1, sizeof(smp1), in, inlen) == OPENSSL_NPN_NEGOTIATED) {
+            return SSL_TLSEXT_ERR_OK;
+        }
+        return SSL_TLSEXT_ERR_NOACK;
+    }, nullptr);
 
     if (SSL_CTX_use_certificate_file(ctx_, certPath.c_str(), SSL_FILETYPE_PEM) <= 0) {
         throw std::runtime_error("Failed to load TLS certificate: " + certPath);
