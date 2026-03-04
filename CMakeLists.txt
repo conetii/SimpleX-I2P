@@ -17,6 +17,7 @@ add_executable(simplex-i2p-smp
     src/smp_store.cpp
     src/smp_protocol.cpp
     src/smp_server.cpp
+    src/sam_client.cpp
 )
 
 target_include_directories(simplex-i2p-smp PRIVATE
@@ -36,6 +37,33 @@ target_link_libraries(simplex-i2p-smp PRIVATE
 target_link_directories(simplex-i2p-smp PRIVATE
     ${SQLCIPHER_LIBRARY_DIRS}
     ${SODIUM_LIBRARY_DIRS}
+)
+
+# SAM test executable
+add_executable(sam-test
+    src/sam_test.cpp
+    src/sam_client.cpp
+)
+
+target_include_directories(sam-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(sam-test PRIVATE
+    pthread
+)
+
+# SAM connect test executable
+add_executable(sam-connect-test
+    src/sam_connect_test.cpp
+)
+
+target_include_directories(sam-connect-test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(sam-connect-test PRIVATE
+    pthread
 )
 
 # Tests

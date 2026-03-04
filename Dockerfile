@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/build/simplex-i2p-smp /usr/local/bin/
+COPY --from=builder /src/build/sam-test /usr/local/bin/
 RUN mkdir -p /data
 
 EXPOSE 5223

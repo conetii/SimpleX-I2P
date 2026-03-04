@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Get .b32.i2p address from i2pd web console
-for PORT in 7072 7070 7071; do
+for PORT in 7070 7072 7071; do
     ADDR=$(curl -s "http://localhost:${PORT}/?page=local_destinations" 2>/dev/null \
         | grep -oP 'b32=\K[a-z0-9]+' | head -1)
     [ -n "$ADDR" ] && break
@@ -25,7 +25,7 @@ TMPCERT=$(mktemp)
 trap "rm -f $TMPCERT" EXIT
 
 # Try docker cp first, then direct path
-CONTAINER=$(docker compose ps -q smp-server 2>/dev/null || true)
+CONTAINER=$(docker-compose ps -q smp-server 2>/dev/null || true)
 if [ -n "$CONTAINER" ]; then
     docker cp "$CONTAINER:/data/server.crt" "$TMPCERT" 2>/dev/null || true
 fi
@@ -44,5 +44,5 @@ else
     echo "  smp://<fingerprint>@${ADDR}.b32.i2p"
     echo ""
     echo "Could not read TLS cert. Get fingerprint manually:"
-    echo "  docker compose exec smp-server cat /data/server.crt"
+    echo "  docker-compose exec smp-server cat /data/server.crt | openssl x509 -outform DER | sha256sum | xxd -r -p | base64 | tr '+/' '-_' | tr -d '='"
 fi

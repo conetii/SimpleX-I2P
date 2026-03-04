@@ -19,6 +19,6 @@ else
 fi
 
 echo "[setup] Starting containers..."
-docker compose up -d --build
+docker-compose up -d --build
 
 echo "[setup] Done. Run ./scripts/show-address.sh to get your .b32.i2p address."
