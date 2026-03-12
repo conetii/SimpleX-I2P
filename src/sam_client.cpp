@@ -127,6 +127,33 @@ void SamClient::startAcceptLoop(const std::string& forwardHost, uint16_t forward
             continue;
         }
 
+        // Send HELLO handshake first
+        std::string hello = "HELLO VERSION MIN=3.1 MAX=3.1\n";
+        if (send(accept_fd, hello.c_str(), hello.size(), 0) < 0) {
+            std::cerr << "[sam] Failed to send HELLO for STREAM ACCEPT" << std::endl;
+            close(accept_fd);
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+
+        // Wait for HELLO REPLY
+        char hello_buf[256];
+        ssize_t hello_recv = recv(accept_fd, hello_buf, sizeof(hello_buf) - 1, 0);
+        if (hello_recv <= 0) {
+            std::cerr << "[sam] Failed to receive HELLO REPLY" << std::endl;
+            close(accept_fd);
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+        hello_buf[hello_recv] = '\0';
+
+        if (std::string(hello_buf).find("RESULT=OK") == std::string::npos) {
+            std::cerr << "[sam] HELLO REPLY not OK: " << hello_buf << std::endl;
+            close(accept_fd);
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+
         // Send STREAM ACCEPT command
         std::ostringstream cmd;
         cmd << "STREAM ACCEPT ID=" << session_id_ << " SILENT=false\n";
@@ -158,15 +185,20 @@ void SamClient::startAcceptLoop(const std::string& forwardHost, uint16_t forward
         if (response.find("RESULT=OK") == std::string::npos) {
             std::cerr << "[sam] STREAM ACCEPT failed: " << response;
             close(accept_fd);
+            // Don't sleep here, try again immediately
             continue;
         }
 
         std::cerr << "[sam] Incoming I2P connection accepted!" << std::endl;
 
         // Now accept_fd is the I2P stream, forward it to local SMP server
+        // Don't close accept_fd here - it will be closed by forwardConnection
         std::thread([this, accept_fd, forwardHost, forwardPort]() {
             forwardConnection(accept_fd, forwardHost, forwardPort);
         }).detach();
+
+        // Don't close accept_fd here! It's now being used by the forwarding thread
+        // Continue loop to accept next connection
     }
 }
 
